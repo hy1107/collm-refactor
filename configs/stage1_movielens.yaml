@@ -1,0 +1,25 @@
+rec:
+  encoder_type: sasrec
+  checkpoint_path: ""
+  embedding_dim: 64
+  use_collaborative_signal: false
+  user_num: 0
+  item_num: 0
+  max_seq_len: 50
+  n_layers: 2
+  n_heads: 2
+  dropout: 0.2
+  n_gcn_layers: 3
+backbone:
+  model_name_or_path: lmsys/vicuna-7b-v1.3
+  lora_r: 8
+  lora_alpha: 16
+  lora_target_modules:
+    - q_proj
+    - v_proj
+  load_in_8bit: false
+data:
+  data_path: /data/ml-1m
+  dataset_type: movielens
+  max_history_len: 20
+  max_seq_len: 512
