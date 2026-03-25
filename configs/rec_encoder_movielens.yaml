@@ -1,9 +1,11 @@
 encoder_type: sasrec
+checkpoint_path: /checkpoints/sasrec_ml1m.pth
 embedding_dim: 64
+use_collaborative_signal: true
+user_num: 0
+item_num: 0
 max_seq_len: 50
 n_layers: 2
 n_heads: 2
 dropout: 0.2
 n_gcn_layers: 3
-user_num: 0
-item_num: 0
