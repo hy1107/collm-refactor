@@ -11,3 +11,9 @@ venv/
 *.DS_Store
 .pytest_cache/
 .mypy_cache/
+*.pkl
+checkpoints/
+outputs/
+wandb/
+*.log
+*.pth

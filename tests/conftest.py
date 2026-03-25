@@ -1,13 +1,11 @@
 import pytest
 import torch
 import pandas as pd
-import tempfile
-import os
-from collm.training.config import RecEncoderConfig, BackboneConfig, DataConfig
 
 
 @pytest.fixture
 def tiny_rec_config():
+    from collm.training.config import RecEncoderConfig
     return RecEncoderConfig(
         encoder_type="mf",
         checkpoint_path="",
@@ -25,6 +23,7 @@ def tiny_rec_config():
 
 @pytest.fixture
 def tiny_backbone_config():
+    from collm.training.config import BackboneConfig
     return BackboneConfig(
         model_name_or_path="gpt2",
         lora_r=4,
@@ -40,18 +39,18 @@ def batch_size():
 
 
 @pytest.fixture
-def user_ids(batch_size):
+def user_ids():
     return torch.tensor([0, 1, 2])
 
 
 @pytest.fixture
-def item_ids(batch_size):
+def item_ids():
     return torch.tensor([5, 6, 7])
 
 
 @pytest.fixture
-def seq_history(batch_size):
-    # (batch, max_seq_len)，0 為 padding
+def seq_history():
+    # (batch=3, max_seq_len=5)，0 為 padding
     return torch.tensor([[1, 2, 3, 0, 0], [4, 5, 0, 0, 0], [6, 7, 8, 9, 10]])
 
 
