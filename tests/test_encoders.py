@@ -5,6 +5,7 @@ import numpy as np
 from collm.encoders.base import BaseRecEncoder
 from collm.encoders.mf import MFEncoder
 from collm.encoders.lightgcn import LightGCNEncoder
+from collm.encoders.sasrec import SASRecEncoder
 
 
 def test_base_encoder_is_abstract():
@@ -76,3 +77,24 @@ def test_lightgcn_output_shape(tiny_rec_config):
 
     assert user_emb.shape == (3, tiny_rec_config.embedding_dim)
     assert item_emb.shape == (3, tiny_rec_config.embedding_dim)
+
+
+def test_sasrec_output_shape(tiny_rec_config, user_ids, item_ids, seq_history):
+    encoder = SASRecEncoder(tiny_rec_config)
+    user_emb = encoder.get_user_embedding(user_ids, seq_history=seq_history)
+    item_emb = encoder.get_item_embedding(item_ids)
+
+    assert user_emb.shape == (3, tiny_rec_config.embedding_dim)
+    assert item_emb.shape == (3, tiny_rec_config.embedding_dim)
+
+
+def test_sasrec_user_emb_differs_with_different_history(tiny_rec_config):
+    """不同的歷史序列應產生不同的用戶表示"""
+    encoder = SASRecEncoder(tiny_rec_config)
+    ids = torch.tensor([0])
+    hist1 = torch.tensor([[1, 2, 3, 0, 0]])
+    hist2 = torch.tensor([[4, 5, 6, 7, 8]])
+
+    emb1 = encoder.get_user_embedding(ids, seq_history=hist1)
+    emb2 = encoder.get_user_embedding(ids, seq_history=hist2)
+    assert not torch.allclose(emb1, emb2)
