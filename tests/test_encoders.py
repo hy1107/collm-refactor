@@ -1,7 +1,10 @@
 import pytest
 import torch
+import scipy.sparse as sp
+import numpy as np
 from collm.encoders.base import BaseRecEncoder
 from collm.encoders.mf import MFEncoder
+from collm.encoders.lightgcn import LightGCNEncoder
 
 
 def test_base_encoder_is_abstract():
@@ -48,3 +51,28 @@ def test_mf_encoder_save_load(tiny_rec_config, tmp_path):
     assert torch.allclose(
         encoder.user_emb.weight, loaded.user_emb.weight
     )
+
+
+def _make_adj_matrix(user_num, item_num):
+    """建立一個簡單的 user-item 交互鄰接矩陣（COO 格式 → sparse tensor）"""
+    rows = np.array([0, 1, 2, user_num + 0, user_num + 1, user_num + 2])
+    cols = np.array([user_num + 0, user_num + 1, user_num + 2, 0, 1, 2])
+    data = np.ones(len(rows))
+    n = user_num + item_num
+    mat = sp.coo_matrix((data, (rows, cols)), shape=(n, n))
+    indices = torch.from_numpy(np.vstack([mat.row, mat.col])).long()
+    values = torch.from_numpy(mat.data).float()
+    return torch.sparse_coo_tensor(indices, values, (n, n))
+
+
+def test_lightgcn_output_shape(tiny_rec_config):
+    adj = _make_adj_matrix(tiny_rec_config.user_num, tiny_rec_config.item_num)
+    encoder = LightGCNEncoder(tiny_rec_config, adj)
+    user_ids = torch.tensor([0, 1, 2])
+    item_ids = torch.tensor([0, 1, 2])
+
+    user_emb = encoder.get_user_embedding(user_ids)
+    item_emb = encoder.get_item_embedding(item_ids)
+
+    assert user_emb.shape == (3, tiny_rec_config.embedding_dim)
+    assert item_emb.shape == (3, tiny_rec_config.embedding_dim)
