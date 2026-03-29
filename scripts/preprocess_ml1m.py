@@ -1,28 +1,23 @@
 """
 ML-1M 資料預處理腳本（Timestamp Split + Rolling History）。
 
-切分策略（對應原始 CoLLM 論文）：
-    1. 所有正向互動按全局時間戳排序
-    2. 依 --train_ratio / --valid_ratio 將時間軸分成三段
-    3. 訓練段內每一筆互動都生一個訓練樣本，
-       樣本的 history = 該用戶在此互動之前的所有正向互動（遞增）
-    4. Valid / Test 樣本只保留「目標物品是暖物品（出現在訓練正樣本集合）」的互動
+對應原始 CoLLM 論文做法：
+    - 使用「所有」評分（不只正向）
+    - rating > 3 → label=1（正），其餘 → label=0（負）
+    - History 只由正向互動（rating > 3）遞增累積
+    - 全局時間戳切分成訓練 / 驗證 / 測試三段
+    - 每筆落在訓練段的評分都生一個訓練樣本
+    - Valid / Test 只保留目標物品是暖物品（出現在訓練正樣本）的互動
 
 每筆樣本欄位：
     uid, iid, title, history_iid, history_titles, label
-
-預設 --train_ratio 0.06 / --valid_ratio 0.02 對應論文 Train~33K / Valid~10K / Test~7K。
-執行時會先印出各段的原始互動數與估計樣本數，可依需求調整比例。
 
 用法：
     python scripts/preprocess_ml1m.py \\
         --data_dir   /data/ml-1m \\
         --output_dir /data/ml-1m \\
-        --train_ratio 0.06 \\
-        --valid_ratio 0.02 \\
-        --train_neg   1 \\
-        --eval_neg    1 \\
-        --min_inter   5
+        --train_ratio 0.033 \\
+        --valid_ratio 0.010
 """
 import argparse
 import os
@@ -66,101 +61,83 @@ def build_records(
     id2title: dict,
     train_ratio: float,
     valid_ratio: float,
-    train_neg: int,
-    eval_neg: int,
     min_inter: int,
 ) -> tuple:
-    # ── 1. 過濾正向互動，全局時間排序 ────────────────────────────────
-    pos = ratings[ratings["Rating"] > 3].sort_values("Timestamp").reset_index(drop=True)
+    # ── 1. 所有評分按時間排序（正負都保留）────────────────────────────
+    all_ratings = ratings.sort_values("Timestamp").reset_index(drop=True)
 
-    # 重新編碼 ID 為 0-indexed
-    user_ids = sorted(pos["UserID"].unique())
-    item_ids = sorted(pos["MovieID"].unique())
+    # 重新編碼 ID 為 0-indexed（以所有出現過的 user/item 為基礎）
+    user_ids = sorted(all_ratings["UserID"].unique())
+    item_ids = sorted(all_ratings["MovieID"].unique())
     u2idx = {u: i for i, u in enumerate(user_ids)}
     i2idx = {it: i for i, it in enumerate(item_ids)}
-    pos["uid"] = pos["UserID"].map(u2idx)
-    pos["iid"] = pos["MovieID"].map(i2idx)
+    all_ratings["uid"] = all_ratings["UserID"].map(u2idx)
+    all_ratings["iid"] = all_ratings["MovieID"].map(i2idx)
+    all_ratings["label"] = (all_ratings["Rating"] > 3).astype(int)
 
     # ── 2. 以時間戳決定三段切分點 ────────────────────────────────────
-    ts_min = pos["Timestamp"].min()
-    ts_max = pos["Timestamp"].max()
+    ts_min = all_ratings["Timestamp"].min()
+    ts_max = all_ratings["Timestamp"].max()
     ts_range = ts_max - ts_min
 
     train_end_ts = ts_min + int(ts_range * train_ratio)
     valid_end_ts = ts_min + int(ts_range * (train_ratio + valid_ratio))
 
-    pos["split"] = "test"
-    pos.loc[pos["Timestamp"] <  train_end_ts, "split"] = "train"
-    pos.loc[(pos["Timestamp"] >= train_end_ts) &
-            (pos["Timestamp"] <  valid_end_ts), "split"] = "valid"
+    all_ratings["split"] = "test"
+    all_ratings.loc[all_ratings["Timestamp"] < train_end_ts, "split"] = "train"
+    all_ratings.loc[
+        (all_ratings["Timestamp"] >= train_end_ts) &
+        (all_ratings["Timestamp"] <  valid_end_ts), "split"
+    ] = "valid"
 
-    n_train_raw = (pos["split"] == "train").sum()
-    n_valid_raw = (pos["split"] == "valid").sum()
-    n_test_raw  = (pos["split"] == "test").sum()
-    print(f"  時間戳切分：train={n_train_raw} / valid={n_valid_raw} / test={n_test_raw} 筆正向互動")
+    for s in ["train", "valid", "test"]:
+        n = (all_ratings["split"] == s).sum()
+        pos = ((all_ratings["split"] == s) & (all_ratings["label"] == 1)).sum()
+        print(f"  {s}: {n} 筆（pos={pos}, neg={n-pos}）")
 
-    # ── 3. 過濾互動次數不足的用戶 ────────────────────────────────────
-    user_total = pos.groupby("uid").size()
-    valid_users = set(user_total[user_total >= min_inter].index)
-    pos = pos[pos["uid"].isin(valid_users)].reset_index(drop=True)
+    # ── 3. 過濾互動次數不足的用戶（以正向互動計）────────────────────
+    pos_counts = all_ratings[all_ratings["label"] == 1].groupby("uid").size()
+    valid_users = set(pos_counts[pos_counts >= min_inter].index)
+    all_ratings = all_ratings[all_ratings["uid"].isin(valid_users)].reset_index(drop=True)
 
-    # ── 4. 計算暖物品集合（訓練段出現過的目標物品）────────────────────
-    train_items = set(pos[pos["split"] == "train"]["iid"])
-    print(f"  暖物品數：{len(train_items)}")
+    # ── 4. 計算暖物品集合（訓練段的正樣本目標）──────────────────────
+    train_pos = all_ratings[(all_ratings["split"] == "train") & (all_ratings["label"] == 1)]
+    warm_items = set(train_pos["iid"])
+    print(f"  暖物品數：{len(warm_items)}")
 
-    # ── 5. 逐時間順序處理，維護每位 user 的遞增歷史 ─────────────────
-    all_items = list(range(len(item_ids)))
-    user_interacted: dict[int, set] = defaultdict(set)
+    # ── 5. 逐時間順序建樣本，維護各 user 的正向歷史 ─────────────────
     user_hist_iid:   dict[int, list] = defaultdict(list)
     user_hist_title: dict[int, list] = defaultdict(list)
+    user_pos_seen:   dict[int, set]  = defaultdict(set)
 
     train_records, valid_records, test_records = [], [], []
 
-    for _, row in pos.iterrows():
+    for _, row in all_ratings.iterrows():
         uid   = int(row["uid"])
         iid   = int(row["iid"])
+        label = int(row["label"])
         title = id2title.get(row["MovieID"], "Unknown")
         split = row["split"]
 
         hist_iid   = user_hist_iid[uid]
         hist_title = user_hist_title[uid]
-        neg_pool   = list(set(all_items) - user_interacted[uid])
+
+        record = make_record(uid, iid, title, hist_iid, hist_title, label)
 
         if split == "train":
-            # 訓練樣本：以當前歷史為 context，當前物品為 target
-            train_records.append(make_record(uid, iid, title, hist_iid, hist_title, 1))
-            for _ in range(train_neg):
-                neg = random.choice(neg_pool) if neg_pool else iid
-                train_records.append(make_record(
-                    uid, neg, id2title.get(item_ids[neg], "Unknown"),
-                    hist_iid, hist_title, 0
-                ))
+            train_records.append(record)
 
-        elif split == "valid" and iid in train_items:
-            # Valid：只保留目標是暖物品的樣本
-            valid_records.append(make_record(uid, iid, title, hist_iid, hist_title, 1))
-            for _ in range(eval_neg):
-                neg = random.choice(neg_pool) if neg_pool else iid
-                valid_records.append(make_record(
-                    uid, neg, id2title.get(item_ids[neg], "Unknown"),
-                    hist_iid, hist_title, 0
-                ))
+        elif split == "valid" and iid in warm_items:
+            valid_records.append(record)
 
-        elif split == "test" and iid in train_items:
-            # Test：只保留目標是暖物品的樣本
-            test_records.append(make_record(uid, iid, title, hist_iid, hist_title, 1))
-            for _ in range(eval_neg):
-                neg = random.choice(neg_pool) if neg_pool else iid
-                test_records.append(make_record(
-                    uid, neg, id2title.get(item_ids[neg], "Unknown"),
-                    hist_iid, hist_title, 0
-                ))
+        elif split == "test" and iid in warm_items:
+            test_records.append(record)
 
-        # 更新歷史（無論哪個 split 都追蹤，使後續歷史完整）
-        if iid not in user_interacted[uid]:
+        # 只有正向互動才加入歷史
+        if label == 1 and iid not in user_pos_seen[uid]:
             user_hist_iid[uid].append(iid)
             user_hist_title[uid].append(title)
-            user_interacted[uid].add(iid)
+            user_pos_seen[uid].add(iid)
 
     return train_records, valid_records, test_records
 
@@ -169,14 +146,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir",    required=True)
     parser.add_argument("--output_dir",  required=True)
-    parser.add_argument("--train_ratio", type=float, default=0.06,
-                        help="訓練段佔總時間範圍的比例（預設 0.06 ≈ 論文 ~33K）")
-    parser.add_argument("--valid_ratio", type=float, default=0.02,
-                        help="驗證段佔總時間範圍的比例（預設 0.02 ≈ 論文 ~10K）")
-    parser.add_argument("--train_neg",   type=int, default=1,
-                        help="訓練集負樣本數（預設 1）")
-    parser.add_argument("--eval_neg",    type=int, default=1,
-                        help="valid/test 負樣本數（預設 1）")
+    parser.add_argument("--train_ratio", type=float, default=0.033,
+                        help="訓練段佔總時間範圍的比例（預設 0.033 ≈ 論文 Train~33K）")
+    parser.add_argument("--valid_ratio", type=float, default=0.010,
+                        help="驗證段佔總時間範圍的比例（預設 0.010 ≈ 論文 Valid~10K）")
     parser.add_argument("--min_inter",   type=int, default=5,
                         help="用戶最少正向互動數（預設 5）")
     parser.add_argument("--seed",        type=int, default=42)
@@ -190,16 +163,15 @@ def main():
     ratings  = load_ratings(args.data_dir)
     id2title = load_movies(args.data_dir)
 
-    print("建構樣本...")
+    print("切分統計（過濾前）：")
     train_rec, valid_rec, test_rec = build_records(
         ratings, id2title,
         train_ratio=args.train_ratio,
         valid_ratio=args.valid_ratio,
-        train_neg=args.train_neg,
-        eval_neg=args.eval_neg,
         min_inter=args.min_inter,
     )
 
+    print("儲存...")
     for name, records in [("train", train_rec), ("valid", valid_rec), ("test", test_rec)]:
         df = pd.DataFrame(records)
         out_path = os.path.join(args.output_dir, f"{name}.pkl")
