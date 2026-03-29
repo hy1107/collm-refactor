@@ -9,17 +9,23 @@ from collm.constants import USER_TOKEN, ITEM_TOKEN
 def build_backbone(config: BackboneConfig) -> tuple:
     """載入 HuggingFace LLM、注冊占位符 token、套用 LoRA。
 
-    若 model_name_or_path 含 adapter_config.json（Stage 1 checkpoint），
-    則用 PeftModel.from_pretrained 載入已訓練的 LoRA，不重新初始化。
+    三種情況：
+    1. adapter_config.json 存在 → PEFT checkpoint，用 PeftModel 載入
+    2. config.json 存在（無 adapter_config.json）→ 全量 Stage 1 checkpoint，直接載入，不套新 LoRA
+    3. 都不存在 → base model，初始化新 LoRA（Stage 1 訓練）
 
     Args:
         config: BackboneConfig，指定模型路徑和 LoRA 超參數
 
     Returns:
-        (model, tokenizer) tuple。model 已套用 LoRA，tokenizer 已含占位符。
+        (model, tokenizer) tuple。
     """
-    is_peft_checkpoint = os.path.exists(
-        os.path.join(config.model_name_or_path, "adapter_config.json")
+    path = config.model_name_or_path
+    is_peft_checkpoint = os.path.exists(os.path.join(path, "adapter_config.json"))
+    is_full_checkpoint = (
+        not is_peft_checkpoint
+        and os.path.exists(os.path.join(path, "config.json"))
+        and os.path.exists(os.path.join(path, "model.safetensors"))
     )
 
     load_kwargs = dict(
@@ -31,40 +37,37 @@ def build_backbone(config: BackboneConfig) -> tuple:
         load_kwargs.pop("dtype", None)
 
     if is_peft_checkpoint:
-        # Stage 2：從 adapter_config.json 取得 base model 路徑，再套上 LoRA
+        # PEFT adapter checkpoint（理想的 Stage 1 存法）
         import json
-        adapter_cfg = json.load(
-            open(os.path.join(config.model_name_or_path, "adapter_config.json"))
-        )
-        base_model_path = adapter_cfg["base_model_name_or_path"]
+        adapter_cfg = json.load(open(os.path.join(path, "adapter_config.json")))
+        base_path = adapter_cfg["base_model_name_or_path"]
 
-        base_model = AutoModelForCausalLM.from_pretrained(base_model_path, **load_kwargs)
-        tokenizer = AutoTokenizer.from_pretrained(base_model_path, use_fast=False)
-
-        tokenizer.add_special_tokens(
-            {"additional_special_tokens": [USER_TOKEN, ITEM_TOKEN]}
-        )
+        base_model = AutoModelForCausalLM.from_pretrained(base_path, **load_kwargs)
+        tokenizer = AutoTokenizer.from_pretrained(base_path, use_fast=False)
+        tokenizer.add_special_tokens({"additional_special_tokens": [USER_TOKEN, ITEM_TOKEN]})
         base_model.resize_token_embeddings(len(tokenizer))
-
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
 
-        model = PeftModel.from_pretrained(base_model, config.model_name_or_path)
-        model.print_trainable_parameters()
-    else:
-        # Stage 1：載入 base model，初始化新 LoRA
-        model = AutoModelForCausalLM.from_pretrained(
-            config.model_name_or_path, **load_kwargs
-        )
-        tokenizer = AutoTokenizer.from_pretrained(
-            config.model_name_or_path, use_fast=False
-        )
+        model = PeftModel.from_pretrained(base_model, path)
+        print(f"[backbone] 載入 PEFT checkpoint：{path}")
 
-        tokenizer.add_special_tokens(
-            {"additional_special_tokens": [USER_TOKEN, ITEM_TOKEN]}
-        )
+    elif is_full_checkpoint:
+        # 全量 Stage 1 checkpoint（LoRA 已合併）：直接載入，不套新 LoRA
+        model = AutoModelForCausalLM.from_pretrained(path, **load_kwargs)
+        tokenizer = AutoTokenizer.from_pretrained(path, use_fast=False)
+        tokenizer.add_special_tokens({"additional_special_tokens": [USER_TOKEN, ITEM_TOKEN]})
         model.resize_token_embeddings(len(tokenizer))
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        print(f"[backbone] 載入全量 Stage 1 checkpoint：{path}")
 
+    else:
+        # Base model：初始化新 LoRA（Stage 1 訓練用）
+        model = AutoModelForCausalLM.from_pretrained(path, **load_kwargs)
+        tokenizer = AutoTokenizer.from_pretrained(path, use_fast=False)
+        tokenizer.add_special_tokens({"additional_special_tokens": [USER_TOKEN, ITEM_TOKEN]})
+        model.resize_token_embeddings(len(tokenizer))
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
 
@@ -78,5 +81,6 @@ def build_backbone(config: BackboneConfig) -> tuple:
         )
         model = get_peft_model(model, lora_config)
         model.print_trainable_parameters()
+        print(f"[backbone] 載入 base model + 初始化 LoRA：{path}")
 
     return model, tokenizer
