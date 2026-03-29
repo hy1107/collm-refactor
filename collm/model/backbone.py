@@ -1,4 +1,4 @@
-from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, PreTrainedTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, PreTrainedTokenizer, BitsAndBytesConfig
 from peft import LoraConfig, get_peft_model, TaskType
 import torch
 from collm.training.config import BackboneConfig
@@ -17,14 +17,13 @@ def build_backbone(config: BackboneConfig) -> tuple:
     Returns:
         (model, tokenizer) tuple。model 已套用 LoRA，tokenizer 已含占位符。
     """
-    dtype = torch.float16
-
     load_kwargs = dict(
-        torch_dtype=dtype,
+        dtype=torch.float16,
         device_map="auto",
     )
     if config.load_in_8bit:
-        load_kwargs["load_in_8bit"] = True
+        load_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
+        load_kwargs.pop("dtype", None)  # 8bit 模式下不指定 dtype
 
     model = AutoModelForCausalLM.from_pretrained(
         config.model_name_or_path, **load_kwargs
