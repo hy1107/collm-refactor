@@ -79,10 +79,16 @@ def main():
     parser.add_argument("--per_device_train_batch_size", type=int, default=4)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--logging_steps", type=int, default=50)
+    parser.add_argument("--injection_layer", type=int, default=None,
+                        help="覆寫 YAML 的 injection_layer（0=input embedding，N=第 N 個 block 後）")
     args = parser.parse_args()
 
     raw = yaml.safe_load(open(args.config))
     cfg = dacite.from_dict(CoLLMConfig, raw, config=dacite.Config(cast=[list]))
+
+    # CLI 覆寫 injection_layer
+    if args.injection_layer is not None:
+        cfg.injection_layer = args.injection_layer
 
     train_df = pd.read_pickle(cfg.data.data_path + "/train.pkl")
     cfg.rec.user_num = int(train_df["uid"].max()) + 1
@@ -91,6 +97,13 @@ def main():
 
     cfg.backbone.model_name_or_path = args.stage1_checkpoint
     backbone, tokenizer = build_backbone(cfg.backbone)
+
+    # 印出實驗關鍵資訊
+    base_model_name = cfg.backbone.model_name_or_path
+    print(f"[CoLLM] LLM        : {base_model_name}")
+    print(f"[CoLLM] Rec encoder: {cfg.rec.encoder_type}")
+    print(f"[CoLLM] Inject layer: {cfg.injection_layer} "
+          f"({'input embedding' if cfg.injection_layer == 0 else f'transformer block {cfg.injection_layer}'})")
 
     EncoderClass = _ENCODER_MAP[cfg.rec.encoder_type]
     if cfg.rec.encoder_type == "lightgcn":
