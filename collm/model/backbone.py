@@ -18,7 +18,11 @@ def build_backbone(config: BackboneConfig) -> tuple:
     3. 都不存在 → base model，初始化新 LoRA（Stage 1 訓練）
     """
     path = config.model_name_or_path
-    is_peft_checkpoint = os.path.exists(os.path.join(path, "adapter_config.json"))
+    is_peft_checkpoint = (
+        os.path.exists(os.path.join(path, "adapter_config.json")) and
+        (os.path.exists(os.path.join(path, "adapter_model.safetensors")) or
+         os.path.exists(os.path.join(path, "adapter_model.bin")))
+    )
     is_collm_checkpoint = (
         not is_peft_checkpoint
         and os.path.exists(os.path.join(path, "config.json"))
