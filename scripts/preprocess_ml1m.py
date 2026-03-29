@@ -3,24 +3,27 @@ ML-1M 資料預處理腳本。
 
 產生 train.pkl / valid.pkl / test.pkl，格式與 RecDataset 相容。
 
-每筆樣本欄位：
-    uid           : int，用戶 ID（0-indexed）
-    iid           : int，物品 ID（0-indexed）
-    title         : str，電影標題
-    history_iid   : list[int]，歷史互動物品 ID（時間升序）
-    history_titles: list[str]，歷史互動物品標題
-    label         : int，1=正樣本，0=負樣本
+切分策略（對應原始 CoLLM 論文）：
+    每位用戶按時間排序後：
+        test  = 最後一筆正向互動（目標物品必須是暖物品）
+        valid = 倒數第二筆（目標物品必須是暖物品）
+        train = 倒數第三筆（= 訓練期最後一筆），使用 train_neg_per_pos 個負樣本
 
-切分策略（leave-one-out）：
-    每位用戶按時間排序後，最後一筆 → test，倒數第二筆 → valid，其餘 → train
-    負樣本：對每筆正樣本隨機採樣一筆用戶未互動過的物品
+    暖物品定義：出現在訓練集正樣本目標中的物品。
+    只有目標物品是暖物品的 valid/test 樣本才會被保留（對應論文的暖啟動評估）。
+
+    訓練集每位 user 只有 1 個正樣本（對應論文 ~33K 筆的規模）。
+
+每筆樣本欄位：
+    uid, iid, title, history_iid, history_titles, label
 
 用法：
-    python scripts/preprocess_ml1m.py \
-        --data_dir /data/ml-1m \
-        --output_dir /data/ml-1m \
-        --neg_per_pos 1 \
-        --min_interactions 5
+    python scripts/preprocess_ml1m.py \\
+        --data_dir   /data/ml-1m \\
+        --output_dir /data/ml-1m \\
+        --train_neg  5 \\
+        --eval_neg   1 \\
+        --min_inter  5
 """
 import argparse
 import os
@@ -31,12 +34,11 @@ import numpy as np
 
 def load_ratings(data_dir: str) -> pd.DataFrame:
     path = os.path.join(data_dir, "ratings.dat")
-    df = pd.read_csv(
+    return pd.read_csv(
         path, sep="::", header=None,
         names=["UserID", "MovieID", "Rating", "Timestamp"],
         engine="python",
     )
-    return df
 
 
 def load_movies(data_dir: str) -> dict:
@@ -49,10 +51,24 @@ def load_movies(data_dir: str) -> dict:
     return dict(zip(df["MovieID"], df["Title"]))
 
 
-def build_records(ratings: pd.DataFrame, id2title: dict, neg_per_pos: int) -> tuple:
-    """回傳 (train_records, valid_records, test_records)"""
-    # 只保留正向互動（rating ≥ 4），按時間排序
-    pos = ratings[ratings["Rating"] >= 4].sort_values("Timestamp")
+def make_record(uid, iid, title, history, history_titles, label):
+    return {
+        "uid": uid, "iid": iid, "title": title,
+        "history_iid": history[:],
+        "history_titles": history_titles[:],
+        "label": label,
+    }
+
+
+def build_records(
+    ratings: pd.DataFrame,
+    id2title: dict,
+    train_neg: int,
+    eval_neg: int,
+    min_inter: int,
+) -> tuple:
+    # 只保留正向互動（rating > 3），按時間排序
+    pos = ratings[ratings["Rating"] > 3].sort_values("Timestamp")
 
     # 重新編碼為 0-indexed
     user_ids = sorted(pos["UserID"].unique())
@@ -60,65 +76,97 @@ def build_records(ratings: pd.DataFrame, id2title: dict, neg_per_pos: int) -> tu
     u2idx = {u: i for i, u in enumerate(user_ids)}
     i2idx = {it: i for i, it in enumerate(item_ids)}
 
-    # 每個 user 的正向互動序列
+    # 每個 user 的正向互動序列（時間升序，去重保留首次）
     user_history: dict[int, list] = {}
     for _, row in pos.iterrows():
         uid = u2idx[row["UserID"]]
         iid = i2idx[row["MovieID"]]
         user_history.setdefault(uid, [])
-        if iid not in user_history[uid]:  # 去重（保留第一次）
+        if iid not in user_history[uid]:
             user_history[uid].append(iid)
 
-    all_items = set(range(len(item_ids)))
+    # 過濾互動數不足的用戶
+    user_history = {u: h for u, h in user_history.items() if len(h) >= min_inter}
+
+    all_items = list(range(len(item_ids)))
+
+    # 訓練集正樣本目標集合（暖物品集合）
+    train_warm_items = set()
+    for hist in user_history.values():
+        if len(hist) >= 3:
+            train_warm_items.add(hist[-3])  # 訓練正樣本的目標物品
+
     train_records, valid_records, test_records = [], [], []
 
     for uid, hist in user_history.items():
-        if len(hist) < 3:
-            continue  # 至少需要 3 筆才能切 train/valid/test
-
-        # 各筆 positive 的 title 列表
         titles = [id2title.get(item_ids[iid], "Unknown") for iid in hist]
+        neg_pool = list(set(all_items) - set(hist))
 
-        # leave-one-out 切分
-        # test = 最後一筆，valid = 倒數第二筆，train = 其餘
-        splits = [
-            (test_records,  hist[:-1],  hist[-1],  titles[:-1],  titles[-1]),
-            (valid_records, hist[:-2],  hist[-2],  titles[:-2],  titles[-2]),
-        ]
-        for i, iid in enumerate(hist[:-2]):
-            splits.append((train_records, hist[:i], iid, titles[:i], titles[i]))
+        # ── 訓練樣本：倒數第三筆，history = 前面所有互動 ──────────────
+        train_target_iid   = hist[-3]
+        train_history      = hist[:-3]
+        train_target_title = titles[-3]
+        train_history_titles = titles[:-3]
 
-        neg_pool = list(all_items - set(hist))
+        train_records.append(make_record(
+            uid, train_target_iid, train_target_title,
+            train_history, train_history_titles, 1
+        ))
+        for _ in range(train_neg):
+            neg = random.choice(neg_pool)
+            train_records.append(make_record(
+                uid, neg, id2title.get(item_ids[neg], "Unknown"),
+                train_history, train_history_titles, 0
+            ))
 
-        for target_list, history, target_iid, history_titles, target_title in splits:
-            # 正樣本
-            target_list.append({
-                "uid": uid, "iid": target_iid,
-                "title": target_title,
-                "history_iid": history[:],
-                "history_titles": history_titles[:],
-                "label": 1,
-            })
-            # 負樣本
-            for _ in range(neg_per_pos):
-                neg_iid = random.choice(neg_pool)
-                target_list.append({
-                    "uid": uid, "iid": neg_iid,
-                    "title": id2title.get(item_ids[neg_iid], "Unknown"),
-                    "history_iid": history[:],
-                    "history_titles": history_titles[:],
-                    "label": 0,
-                })
+        # ── Valid 樣本：倒數第二筆，只有暖物品才保留 ──────────────────
+        valid_target_iid = hist[-2]
+        if valid_target_iid in train_warm_items:
+            valid_history        = hist[:-2]
+            valid_target_title   = titles[-2]
+            valid_history_titles = titles[:-2]
+            valid_records.append(make_record(
+                uid, valid_target_iid, valid_target_title,
+                valid_history, valid_history_titles, 1
+            ))
+            for _ in range(eval_neg):
+                neg = random.choice(neg_pool)
+                valid_records.append(make_record(
+                    uid, neg, id2title.get(item_ids[neg], "Unknown"),
+                    valid_history, valid_history_titles, 0
+                ))
+
+        # ── Test 樣本：最後一筆，只有暖物品才保留 ─────────────────────
+        test_target_iid = hist[-1]
+        if test_target_iid in train_warm_items:
+            test_history        = hist[:-1]
+            test_target_title   = titles[-1]
+            test_history_titles = titles[:-1]
+            test_records.append(make_record(
+                uid, test_target_iid, test_target_title,
+                test_history, test_history_titles, 1
+            ))
+            for _ in range(eval_neg):
+                neg = random.choice(neg_pool)
+                test_records.append(make_record(
+                    uid, neg, id2title.get(item_ids[neg], "Unknown"),
+                    test_history, test_history_titles, 0
+                ))
 
     return train_records, valid_records, test_records
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_dir",   required=True, help="ml-1m 原始資料目錄")
-    parser.add_argument("--output_dir", required=True, help="pkl 輸出目錄（可與 data_dir 相同）")
-    parser.add_argument("--neg_per_pos", type=int, default=1, help="每筆正樣本對應的負樣本數")
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--data_dir",   required=True)
+    parser.add_argument("--output_dir", required=True)
+    parser.add_argument("--train_neg",  type=int, default=5,
+                        help="訓練集每筆正樣本對應的負樣本數（預設 5）")
+    parser.add_argument("--eval_neg",   type=int, default=1,
+                        help="valid/test 每筆正樣本對應的負樣本數（預設 1）")
+    parser.add_argument("--min_inter",  type=int, default=5,
+                        help="用戶最少正向互動數（預設 5）")
+    parser.add_argument("--seed",       type=int, default=42)
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -130,7 +178,12 @@ def main():
     id2title = load_movies(args.data_dir)
 
     print("建構樣本...")
-    train_rec, valid_rec, test_rec = build_records(ratings, id2title, args.neg_per_pos)
+    train_rec, valid_rec, test_rec = build_records(
+        ratings, id2title,
+        train_neg=args.train_neg,
+        eval_neg=args.eval_neg,
+        min_inter=args.min_inter,
+    )
 
     for name, records in [("train", train_rec), ("valid", valid_rec), ("test", test_rec)]:
         df = pd.DataFrame(records)
@@ -138,7 +191,7 @@ def main():
         df.to_pickle(out_path)
         pos = (df["label"] == 1).sum()
         neg = (df["label"] == 0).sum()
-        print(f"  {name}.pkl: {len(df)} 筆（pos={pos}, neg={neg}）→ {out_path}")
+        print(f"  {name}.pkl: {len(df):>7} 筆（pos={pos}, neg={neg}）→ {out_path}")
 
     print("完成。")
 
