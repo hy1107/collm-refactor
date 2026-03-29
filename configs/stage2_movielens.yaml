@@ -23,3 +23,5 @@ data:
   dataset_type: movielens
   max_history_len: 20
   max_seq_len: 512
+# 協同信號注入層：0 = input embedding（原始 CoLLM），正整數 N = 第 N 個 transformer block 輸出後注入
+injection_layer: 0

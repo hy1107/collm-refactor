@@ -45,3 +45,6 @@ class CoLLMConfig:
     rec: RecEncoderConfig
     backbone: BackboneConfig
     data: DataConfig
+    # 協同信號注入層：0 = input embedding 層（原始 CoLLM 預設），
+    # 正整數 N = 在第 N 個 transformer block 的輸出後注入（1-indexed）
+    injection_layer: int = 0
