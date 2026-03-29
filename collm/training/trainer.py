@@ -1,6 +1,7 @@
 from __future__ import annotations
-from typing import Callable
+from typing import Callable, Optional
 import numpy as np
+import torch
 from transformers import Trainer
 from transformers.trainer_utils import EvalPrediction
 from collm.training.metrics import compute_auc, compute_hr, compute_ndcg
@@ -70,3 +71,15 @@ class CoLLMTrainer(Trainer):
             }
 
         return _compute_metrics
+
+    def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
+        """覆寫 prediction_step，只回傳 loss/logits/labels，避免 DynamicCache 造成崩潰。"""
+        inputs = self._prepare_inputs(inputs)
+        with torch.no_grad():
+            outputs = model(**inputs)
+        loss = outputs.loss if hasattr(outputs, "loss") else None
+        logits = outputs.logits if hasattr(outputs, "logits") else None
+        labels = inputs.get("labels")
+        if prediction_loss_only:
+            return (loss, None, None)
+        return (loss, logits, labels)
