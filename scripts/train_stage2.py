@@ -144,6 +144,10 @@ def main():
         per_device_train_batch_size=args.per_device_train_batch_size,
         learning_rate=args.learning_rate,
         logging_steps=args.logging_steps,
+        evaluation_strategy="epoch",
+        save_strategy="epoch",
+        load_best_model_at_end=True,
+        metric_for_best_model="auc",
         fp16=True,
         remove_unused_columns=False,
     )
