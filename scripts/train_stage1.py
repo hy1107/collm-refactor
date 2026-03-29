@@ -33,6 +33,7 @@ def main():
     parser.add_argument("--learning_rate", type=float, default=2e-4)
     parser.add_argument("--logging_steps", type=int, default=50)
     parser.add_argument("--save_steps", type=int, default=500)
+    parser.add_argument("--resume_from_checkpoint", type=str, default=None)
     args = parser.parse_args()
 
     raw = yaml.safe_load(open(args.config))
@@ -81,7 +82,7 @@ def main():
         data_collator=collator,
         compute_metrics=CoLLMTrainer.make_compute_metrics(yes_id, no_id),
     )
-    trainer.train()
+    trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
     trainer.save_model(args.output_dir)
     tokenizer.save_pretrained(args.output_dir)
     print(f"Stage 1 完成，checkpoint 已存至 {args.output_dir}")
