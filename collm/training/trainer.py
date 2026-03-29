@@ -25,8 +25,11 @@ class CoLLMTrainer(Trainer):
         def _compute(eval_pred: EvalPrediction) -> dict:
             scores_2d, labels_1d = eval_pred.predictions, eval_pred.label_ids
             # scores_2d: (N, 2)  labels_1d: (N,)
-            scores = scores_2d[:, 0] - scores_2d[:, 1]   # yes - no
+            scores = (scores_2d[:, 0] - scores_2d[:, 1]).astype(np.float32)
             labels = labels_1d.astype(np.int32)
+            # 過濾 NaN/inf（fp16 溢出）及 padding 殘留（label < 0）
+            valid = np.isfinite(scores) & (labels >= 0)
+            scores, labels = scores[valid], labels[valid]
             return {
                 "auc":     compute_auc(scores, labels),
                 "hr@10":   compute_hr(scores, labels, k=10),
