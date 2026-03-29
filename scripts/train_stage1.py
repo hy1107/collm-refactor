@@ -76,6 +76,7 @@ def main():
         train_dataset=train_ds,
         eval_dataset=eval_ds,
         data_collator=collator,
+        compute_metrics=CoLLMTrainer.default_compute_metrics,
     )
     trainer.train()
     trainer.save_model(args.output_dir)

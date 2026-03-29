@@ -14,7 +14,9 @@ Stage 2：CIE 訓練（帶協同信號）。
 import argparse
 import yaml
 import dacite
+import numpy as np
 import pandas as pd
+import torch
 from transformers import TrainingArguments
 
 from collm.training.config import CoLLMConfig, RecEncoderConfig
@@ -28,6 +30,35 @@ from collm.encoders.mf import MFEncoder
 from collm.encoders.lightgcn import LightGCNEncoder
 from collm.encoders.sasrec import SASRecEncoder
 from collm.encoders.din import DINEncoder
+
+
+def build_lightgcn_adj(df: pd.DataFrame, user_num: int, item_num: int) -> torch.Tensor:
+    """從互動資料建構 LightGCN 正規化鄰接矩陣（D^{-1/2} A D^{-1/2}）。
+
+    只使用正向互動（label=1）建構圖。
+    User 節點 index：0 ~ user_num-1
+    Item 節點 index：user_num ~ user_num+item_num-1
+    """
+    pos = df[df["label"] == 1]
+    users = pos["uid"].values
+    items = pos["iid"].values + user_num   # item index 偏移到 user 之後
+
+    n = user_num + item_num
+    # 雙向邊：user→item 和 item→user
+    row = np.concatenate([users, items])
+    col = np.concatenate([items, users])
+    data = np.ones(len(row), dtype=np.float32)
+
+    # 計算 degree，做 D^{-1/2} 正規化
+    deg = np.zeros(n, dtype=np.float32)
+    np.add.at(deg, row, 1.0)
+    deg_inv_sqrt = np.where(deg > 0, deg ** -0.5, 0.0)
+
+    norm_data = deg_inv_sqrt[row] * data * deg_inv_sqrt[col]
+
+    indices = torch.tensor(np.vstack([row, col]), dtype=torch.long)
+    values = torch.tensor(norm_data, dtype=torch.float32)
+    return torch.sparse_coo_tensor(indices, values, (n, n))
 
 
 _ENCODER_MAP = {
@@ -62,7 +93,11 @@ def main():
     backbone, tokenizer = build_backbone(cfg.backbone)
 
     EncoderClass = _ENCODER_MAP[cfg.rec.encoder_type]
-    rec_encoder = EncoderClass.from_pretrained(cfg.rec.checkpoint_path, cfg.rec)
+    if cfg.rec.encoder_type == "lightgcn":
+        adj_matrix = build_lightgcn_adj(train_df, cfg.rec.user_num, cfg.rec.item_num)
+        rec_encoder = LightGCNEncoder.from_pretrained(cfg.rec.checkpoint_path, cfg.rec, adj_matrix=adj_matrix)
+    else:
+        rec_encoder = EncoderClass.from_pretrained(cfg.rec.checkpoint_path, cfg.rec)
 
     base_config = getattr(backbone, "base_model", backbone).config
     llm_dim = base_config.hidden_size
@@ -106,6 +141,7 @@ def main():
         train_dataset=train_ds,
         eval_dataset=eval_ds,
         data_collator=collator,
+        compute_metrics=CoLLMTrainer.default_compute_metrics,
     )
     trainer.train()
     trainer.save_model(args.output_dir)

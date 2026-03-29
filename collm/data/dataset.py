@@ -27,11 +27,15 @@ class RecDataset(Dataset):
 
     def __getitem__(self, idx: int) -> dict:
         row = self.records[idx]
+        # 相容原始 CoLLM pickle 欄位名稱（his / his_title）
+        # 以及重構版欄位名稱（history_iid / history_title）
+        history_iid = list(row.get("history_iid", row.get("his", [])))
+        history_titles = list(row.get("history_titles", row.get("history_title", row.get("his_title", []))))
         return {
             "uid": int(row["uid"]),
             "iid": int(row["iid"]),
             "title": str(row["title"]),
-            "history_iid": list(row.get("history_iid", [])),
-            "history_titles": list(row.get("history_title", [])),
+            "history_iid": history_iid,
+            "history_titles": history_titles,
             "label": int(row["label"]),
         }
