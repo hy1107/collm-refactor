@@ -80,7 +80,8 @@ def main():
         train_dataset=train_ds,
         eval_dataset=eval_ds,
         data_collator=collator,
-        compute_metrics=CoLLMTrainer.make_compute_metrics(yes_id, no_id),
+        yes_token_id=yes_id,
+        no_token_id=no_id,
     )
     trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
     # 明確存 PEFT adapter（產生 adapter_config.json + adapter_model.safetensors）

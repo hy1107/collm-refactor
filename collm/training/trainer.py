@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Callable, Optional
+from typing import Callable
 import numpy as np
 import torch
 from transformers import Trainer
@@ -10,76 +10,70 @@ from collm.training.metrics import compute_auc, compute_hr, compute_ndcg
 class CoLLMTrainer(Trainer):
     """繼承 HuggingFace Trainer 的 CoLLM 訓練器。
 
-    主要客製化：
-    1. compute_metrics：計算 AUC、HR@10、NDCG@10
-    2. 批次中所有值均為 Tensor，與 HF Trainer 的 device 轉移機制完全相容
-
-    使用範例：
-        yes_id = tokenizer.encode(" Yes", add_special_tokens=False)[0]
-        no_id  = tokenizer.encode(" No",  add_special_tokens=False)[0]
-        trainer = CoLLMTrainer(
-            model=model,
-            args=training_args,
-            train_dataset=train_ds,
-            eval_dataset=eval_ds,
-            data_collator=collator,
-            compute_metrics=CoLLMTrainer.make_compute_metrics(yes_id, no_id),
-        )
-        trainer.train()
+    prediction_step 只保留每樣本的 Yes/No logit，避免收集全 vocab logits 造成 OOM。
+    compute_metrics 接收 (N, 2) 的 scores 陣列（[:, 0]=yes, [:, 1]=no）。
     """
 
-    @staticmethod
-    def make_compute_metrics(yes_token_id: int, no_token_id: int) -> Callable:
-        """建立 compute_metrics 函式，以 Yes/No token logit 差值作為推薦分數。
+    def __init__(self, *args, yes_token_id: int, no_token_id: int, **kwargs):
+        # 移除 compute_metrics，改由內部處理
+        kwargs.pop("compute_metrics", None)
+        super().__init__(*args, compute_metrics=self._make_metrics(), **kwargs)
+        self.yes_token_id = yes_token_id
+        self.no_token_id = no_token_id
 
-        Args:
-            yes_token_id: tokenizer 中 " Yes" 對應的 token ID
-            no_token_id:  tokenizer 中 " No"  對應的 token ID
-
-        eval_pred.predictions: (batch, seq_len, vocab_size) 或 (batch, vocab_size)
-        eval_pred.label_ids:   (batch, seq_len)，prompt 部分為 -100，答案位置為實際 token ID
-        """
-        def _compute_metrics(eval_pred: EvalPrediction) -> dict:
-            logits, labels = eval_pred
-            scores, labels_binary = [], []
-
-            for i in range(len(logits)):
-                if logits.ndim == 3:
-                    # 找到第一個非 -100 的 label 位置（即答案 token 位置）
-                    valid = np.where(labels[i] != -100)[0]
-                    if len(valid) == 0:
-                        continue
-                    pos = valid[0]
-                    score = float(logits[i, pos, yes_token_id] - logits[i, pos, no_token_id])
-                    label = 1 if int(labels[i, pos]) == yes_token_id else 0
-                else:
-                    # logits 已經是 (batch, vocab_size)
-                    score = float(logits[i, yes_token_id] - logits[i, no_token_id])
-                    label = int(labels[i]) if labels.ndim == 1 else int(labels[i, 0])
-                    label = 1 if label == yes_token_id else 0
-
-                scores.append(score)
-                labels_binary.append(label)
-
-            scores = np.array(scores, dtype=np.float32)
-            labels_binary = np.array(labels_binary, dtype=np.int32)
-
+    def _make_metrics(self):
+        def _compute(eval_pred: EvalPrediction) -> dict:
+            scores_2d, labels_1d = eval_pred.predictions, eval_pred.label_ids
+            # scores_2d: (N, 2)  labels_1d: (N,)
+            scores = scores_2d[:, 0] - scores_2d[:, 1]   # yes - no
+            labels = labels_1d.astype(np.int32)
             return {
-                "auc": compute_auc(scores, labels_binary),
-                "hr@10": compute_hr(scores, labels_binary, k=10),
-                "ndcg@10": compute_ndcg(scores, labels_binary, k=10),
+                "auc":     compute_auc(scores, labels),
+                "hr@10":   compute_hr(scores, labels, k=10),
+                "ndcg@10": compute_ndcg(scores, labels, k=10),
             }
-
-        return _compute_metrics
+        return _compute
 
     def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
-        """覆寫 prediction_step，只回傳 loss/logits/labels，避免 DynamicCache 造成崩潰。"""
+        """只保留 Yes/No logit，避免 OOM。回傳 (loss, scores(N,2), binary_labels(N,))。"""
         inputs = self._prepare_inputs(inputs)
         with torch.no_grad():
             outputs = model(**inputs)
+
         loss = outputs.loss if hasattr(outputs, "loss") else None
-        logits = outputs.logits if hasattr(outputs, "logits") else None
-        labels = inputs.get("labels")
         if prediction_loss_only:
             return (loss, None, None)
-        return (loss, logits, labels)
+
+        logits = outputs.logits          # (batch, seq_len, vocab)
+        seq_labels = inputs.get("labels")  # (batch, seq_len)
+        batch_size = logits.shape[0]
+
+        yes_scores = torch.zeros(batch_size, device=logits.device, dtype=torch.float32)
+        no_scores  = torch.zeros(batch_size, device=logits.device, dtype=torch.float32)
+        binary_labels = torch.zeros(batch_size, device=logits.device, dtype=torch.long)
+
+        for i in range(batch_size):
+            valid = (seq_labels[i] != -100).nonzero(as_tuple=True)[0]
+            if len(valid) == 0:
+                continue
+            pos = valid[0]
+            yes_scores[i] = logits[i, pos, self.yes_token_id].float()
+            no_scores[i]  = logits[i, pos, self.no_token_id].float()
+            binary_labels[i] = 1 if int(seq_labels[i, pos]) == self.yes_token_id else 0
+
+        scores = torch.stack([yes_scores, no_scores], dim=1)  # (batch, 2)
+        return (loss, scores, binary_labels)
+
+    @staticmethod
+    def make_compute_metrics(yes_token_id: int, no_token_id: int) -> Callable:
+        """保留向下相容的工廠方法（不再使用，但避免外部呼叫報錯）。"""
+        def _compute(eval_pred: EvalPrediction) -> dict:
+            logits, labels = eval_pred
+            scores = np.array(logits[:, 0] - logits[:, 1], dtype=np.float32)
+            labels = np.array(labels, dtype=np.int32)
+            return {
+                "auc":     compute_auc(scores, labels),
+                "hr@10":   compute_hr(scores, labels, k=10),
+                "ndcg@10": compute_ndcg(scores, labels, k=10),
+            }
+        return _compute
