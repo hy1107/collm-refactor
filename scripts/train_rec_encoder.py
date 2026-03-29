@@ -22,13 +22,18 @@ from tqdm import tqdm
 from collm.training.config import RecEncoderConfig
 from collm.encoders.mf import MFEncoder
 from collm.encoders.sasrec import SASRecEncoder
+from collm.encoders.din import DINEncoder
 
 
 class PairDataset(Dataset):
-    """用戶-物品交互對資料集（正樣本 + BPR 負採樣）。"""
+    """用戶-物品交互對資料集（正樣本 + BPR 負採樣）。
+
+    只使用 label=1 的正向互動作為正樣本，負樣本隨機採樣。
+    """
 
     def __init__(self, df: pd.DataFrame, item_num: int, max_seq_len: int):
-        self.records = df.to_dict("records")
+        # 只保留正向互動，避免把負向互動當成正樣本訓練
+        self.records = df[df["label"] == 1].to_dict("records")
         self.item_num = item_num
         self.max_seq_len = max_seq_len
 
@@ -56,7 +61,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_path", required=True)
     parser.add_argument("--encoder_type", default="sasrec",
-                        choices=["mf", "sasrec"])
+                        choices=["mf", "sasrec", "din"])
     parser.add_argument("--embedding_dim", type=int, default=64)
     parser.add_argument("--n_layers", type=int, default=2)
     parser.add_argument("--n_heads", type=int, default=2)
@@ -86,6 +91,8 @@ def main():
         encoder = MFEncoder(config)
     elif args.encoder_type == "sasrec":
         encoder = SASRecEncoder(config)
+    elif args.encoder_type == "din":
+        encoder = DINEncoder(config)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     encoder = encoder.to(device)
@@ -103,12 +110,21 @@ def main():
             neg = batch["neg_iid"].to(device)
             seq = batch["seq_history"].to(device)
 
-            user_emb = encoder.get_user_embedding(uid, seq_history=seq)
-            pos_emb = encoder.get_item_embedding(pos)
-            neg_emb = encoder.get_item_embedding(neg)
-
-            pos_score = (user_emb * pos_emb).sum(dim=-1)
-            neg_score = (user_emb * neg_emb).sum(dim=-1)
+            # DIN 的 user representation 依賴 target item：
+            # 對正樣本和負樣本分別計算各自的 user embedding
+            if args.encoder_type == "din":
+                user_emb_pos = encoder.get_user_embedding(uid, seq_history=seq, target_item_ids=pos)
+                user_emb_neg = encoder.get_user_embedding(uid, seq_history=seq, target_item_ids=neg)
+                pos_emb = encoder.get_item_embedding(pos)
+                neg_emb = encoder.get_item_embedding(neg)
+                pos_score = (user_emb_pos * pos_emb).sum(dim=-1)
+                neg_score = (user_emb_neg * neg_emb).sum(dim=-1)
+            else:
+                user_emb = encoder.get_user_embedding(uid, seq_history=seq)
+                pos_emb = encoder.get_item_embedding(pos)
+                neg_emb = encoder.get_item_embedding(neg)
+                pos_score = (user_emb * pos_emb).sum(dim=-1)
+                neg_score = (user_emb * neg_emb).sum(dim=-1)
 
             loss = bpr_loss(pos_score, neg_score)
             optimizer.zero_grad()
