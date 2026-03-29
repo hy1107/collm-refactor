@@ -83,7 +83,8 @@ def main():
         compute_metrics=CoLLMTrainer.make_compute_metrics(yes_id, no_id),
     )
     trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
-    trainer.save_model(args.output_dir)
+    # 明確存 PEFT adapter（產生 adapter_config.json + adapter_model.safetensors）
+    model.backbone.save_pretrained(args.output_dir)
     tokenizer.save_pretrained(args.output_dir)
     print(f"Stage 1 完成，checkpoint 已存至 {args.output_dir}")
 
