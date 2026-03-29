@@ -28,7 +28,10 @@ class CoLLMTrainer(Trainer):
             scores = (scores_2d[:, 0] - scores_2d[:, 1]).astype(np.float32)
             labels = labels_1d.astype(np.int32)
             # 過濾 NaN/inf（fp16 溢出）及 padding 殘留（label < 0）
-            valid = np.isfinite(scores) & (labels >= 0)
+            nan_mask = ~np.isfinite(scores)
+            pad_mask = labels < 0
+            print(f"[eval] 總樣本: {len(scores)}, NaN/inf: {nan_mask.sum()} ({nan_mask.mean():.2%}), padding: {pad_mask.sum()}")
+            valid = ~nan_mask & ~pad_mask
             scores, labels = scores[valid], labels[valid]
             return {
                 "auc":     compute_auc(scores, labels),
