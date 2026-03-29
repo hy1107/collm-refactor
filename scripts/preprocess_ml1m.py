@@ -1,13 +1,17 @@
 """
-ML-1M 資料預處理腳本（Timestamp Split + Rolling History）。
+ML-1M 資料預處理腳本（對應原始 CoLLM 論文的精確切分）。
 
-對應原始 CoLLM 論文做法：
-    - 使用「所有」評分（不只正向）
-    - rating > 3 → label=1（正），其餘 → label=0（負）
-    - History 只由正向互動（rating > 3）遞增累積
-    - 全局時間戳切分成訓練 / 驗證 / 測試三段
-    - 每筆落在訓練段的評分都生一個訓練樣本
-    - Valid / Test 只保留目標物品是暖物品（出現在訓練正樣本）的互動
+時間切分（zyang1580/CoLLM dataset/ml-1m/processing_ood.ipynb）：
+    月份索引 = (year - min_year)*12 + month - min_month，起點=0
+    資料跨度：2000/04 ~ 2003/02（共 35 個月，索引 0-34）
+
+    月 0-13  → 歷史期：只累積 user 歷史，不生訓練樣本
+    月 14-23 → Train（10 個月）→ 論文 33,891 筆
+    月 24-28 → Valid（ 5 個月）→ 論文 10,401 筆
+    月 29-33 → Test （ 5 個月）→ 論文  7,331 筆
+
+Label：rating > 3 → y=1，其餘 → y=0（不隨機採樣負樣本）
+History：每個樣本的 context 為「此互動之前的所有正向互動（rating > 3）」
 
 每筆樣本欄位：
     uid, iid, title, history_iid, history_titles, label
@@ -15,13 +19,10 @@ ML-1M 資料預處理腳本（Timestamp Split + Rolling History）。
 用法：
     python scripts/preprocess_ml1m.py \\
         --data_dir   /data/ml-1m \\
-        --output_dir /data/ml-1m \\
-        --train_ratio 0.033 \\
-        --valid_ratio 0.010
+        --output_dir /data/ml-1m
 """
 import argparse
 import os
-import random
 from collections import defaultdict
 
 import numpy as np
@@ -56,63 +57,59 @@ def make_record(uid, iid, title, history_iid, history_titles, label):
     }
 
 
-def build_records(
-    ratings: pd.DataFrame,
-    id2title: dict,
-    train_ratio: float,
-    valid_ratio: float,
-    min_inter: int,
-) -> tuple:
-    # ── 1. 所有評分按時間排序（正負都保留）────────────────────────────
-    all_ratings = ratings.sort_values("Timestamp").reset_index(drop=True)
+def build_records(ratings: pd.DataFrame, id2title: dict) -> tuple:
+    # ── 1. 所有評分，按時間排序 ──────────────────────────────────────
+    df = ratings.sort_values("Timestamp").reset_index(drop=True)
 
-    # 重新編碼 ID 為 0-indexed（以所有出現過的 user/item 為基礎）
-    user_ids = sorted(all_ratings["UserID"].unique())
-    item_ids = sorted(all_ratings["MovieID"].unique())
+    # ── 2. 計算月份索引（對應論文 processing_ood.ipynb）──────────────
+    dt = pd.to_datetime(df["Timestamp"], unit="s")
+    min_year  = dt.min().year
+    min_month = dt.min().month                        # 2000, 4
+    df["month_idx"] = (dt.dt.year  - min_year) * 12 + dt.dt.month - min_month
+
+    print(f"  資料時間範圍：{dt.min().date()} ~ {dt.max().date()}")
+    print(f"  月份索引範圍：{df['month_idx'].min()} ~ {df['month_idx'].max()}")
+
+    # ── 3. 重新編碼 ID ───────────────────────────────────────────────
+    user_ids = sorted(df["UserID"].unique())
+    item_ids = sorted(df["MovieID"].unique())
     u2idx = {u: i for i, u in enumerate(user_ids)}
     i2idx = {it: i for i, it in enumerate(item_ids)}
-    all_ratings["uid"] = all_ratings["UserID"].map(u2idx)
-    all_ratings["iid"] = all_ratings["MovieID"].map(i2idx)
-    all_ratings["label"] = (all_ratings["Rating"] > 3).astype(int)
+    df["uid"]   = df["UserID"].map(u2idx)
+    df["iid"]   = df["MovieID"].map(i2idx)
+    df["label"] = (df["Rating"] > 3).astype(int)
 
-    # ── 2. 以時間戳決定三段切分點 ────────────────────────────────────
-    ts_min = all_ratings["Timestamp"].min()
-    ts_max = all_ratings["Timestamp"].max()
-    ts_range = ts_max - ts_min
+    # ── 4. 月份 → split 對應 ────────────────────────────────────────
+    TRAIN_MONTHS = set(range(14, 24))   # 14-23
+    VALID_MONTHS = set(range(24, 29))   # 24-28
+    TEST_MONTHS  = set(range(29, 34))   # 29-33
+    # 月 0-13：歷史期，不生樣本
 
-    train_end_ts = ts_min + int(ts_range * train_ratio)
-    valid_end_ts = ts_min + int(ts_range * (train_ratio + valid_ratio))
+    def get_split(m):
+        if m in TRAIN_MONTHS: return "train"
+        if m in VALID_MONTHS: return "valid"
+        if m in TEST_MONTHS:  return "test"
+        return "history"   # 月 0-13：只累積歷史
 
-    all_ratings["split"] = "test"
-    all_ratings.loc[all_ratings["Timestamp"] < train_end_ts, "split"] = "train"
-    all_ratings.loc[
-        (all_ratings["Timestamp"] >= train_end_ts) &
-        (all_ratings["Timestamp"] <  valid_end_ts), "split"
-    ] = "valid"
+    df["split"] = df["month_idx"].map(get_split)
 
-    for s in ["train", "valid", "test"]:
-        n = (all_ratings["split"] == s).sum()
-        pos = ((all_ratings["split"] == s) & (all_ratings["label"] == 1)).sum()
-        print(f"  {s}: {n} 筆（pos={pos}, neg={n-pos}）")
+    for s in ["history", "train", "valid", "test"]:
+        n = (df["split"] == s).sum()
+        pos = ((df["split"] == s) & (df["label"] == 1)).sum()
+        print(f"  {s:8s}: {n:>7} 筆（pos={pos}, neg={n-pos}）")
 
-    # ── 3. 過濾互動次數不足的用戶（以正向互動計）────────────────────
-    pos_counts = all_ratings[all_ratings["label"] == 1].groupby("uid").size()
-    valid_users = set(pos_counts[pos_counts >= min_inter].index)
-    all_ratings = all_ratings[all_ratings["uid"].isin(valid_users)].reset_index(drop=True)
-
-    # ── 4. 計算暖物品集合（訓練段的正樣本目標）──────────────────────
-    train_pos = all_ratings[(all_ratings["split"] == "train") & (all_ratings["label"] == 1)]
-    warm_items = set(train_pos["iid"])
+    # ── 5. 暖物品 = 訓練段正樣本中出現的物品 ─────────────────────────
+    warm_items = set(df[(df["split"] == "train") & (df["label"] == 1)]["iid"])
     print(f"  暖物品數：{len(warm_items)}")
 
-    # ── 5. 逐時間順序建樣本，維護各 user 的正向歷史 ─────────────────
+    # ── 6. 逐時間順序處理，維護遞增歷史 ─────────────────────────────
     user_hist_iid:   dict[int, list] = defaultdict(list)
     user_hist_title: dict[int, list] = defaultdict(list)
     user_pos_seen:   dict[int, set]  = defaultdict(set)
 
     train_records, valid_records, test_records = [], [], []
 
-    for _, row in all_ratings.iterrows():
+    for _, row in df.iterrows():
         uid   = int(row["uid"])
         iid   = int(row["iid"])
         label = int(row["label"])
@@ -122,18 +119,21 @@ def build_records(
         hist_iid   = user_hist_iid[uid]
         hist_title = user_hist_title[uid]
 
-        record = make_record(uid, iid, title, hist_iid, hist_title, label)
-
         if split == "train":
-            train_records.append(record)
-
+            train_records.append(
+                make_record(uid, iid, title, hist_iid, hist_title, label)
+            )
         elif split == "valid" and iid in warm_items:
-            valid_records.append(record)
-
+            valid_records.append(
+                make_record(uid, iid, title, hist_iid, hist_title, label)
+            )
         elif split == "test" and iid in warm_items:
-            test_records.append(record)
+            test_records.append(
+                make_record(uid, iid, title, hist_iid, hist_title, label)
+            )
+        # split == "history"：只更新歷史，不生樣本
 
-        # 只有正向互動才加入歷史
+        # 正向互動才加入歷史
         if label == 1 and iid not in user_pos_seen[uid]:
             user_hist_iid[uid].append(iid)
             user_hist_title[uid].append(title)
@@ -144,32 +144,18 @@ def build_records(
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_dir",    required=True)
-    parser.add_argument("--output_dir",  required=True)
-    parser.add_argument("--train_ratio", type=float, default=0.033,
-                        help="訓練段佔總時間範圍的比例（預設 0.033 ≈ 論文 Train~33K）")
-    parser.add_argument("--valid_ratio", type=float, default=0.010,
-                        help="驗證段佔總時間範圍的比例（預設 0.010 ≈ 論文 Valid~10K）")
-    parser.add_argument("--min_inter",   type=int, default=5,
-                        help="用戶最少正向互動數（預設 5）")
-    parser.add_argument("--seed",        type=int, default=42)
+    parser.add_argument("--data_dir",   required=True)
+    parser.add_argument("--output_dir", required=True)
     args = parser.parse_args()
 
-    random.seed(args.seed)
-    np.random.seed(args.seed)
     os.makedirs(args.output_dir, exist_ok=True)
 
     print("載入資料...")
     ratings  = load_ratings(args.data_dir)
     id2title = load_movies(args.data_dir)
 
-    print("切分統計（過濾前）：")
-    train_rec, valid_rec, test_rec = build_records(
-        ratings, id2title,
-        train_ratio=args.train_ratio,
-        valid_ratio=args.valid_ratio,
-        min_inter=args.min_inter,
-    )
+    print("建構樣本...")
+    train_rec, valid_rec, test_rec = build_records(ratings, id2title)
 
     print("儲存...")
     for name, records in [("train", train_rec), ("valid", valid_rec), ("test", test_rec)]:
