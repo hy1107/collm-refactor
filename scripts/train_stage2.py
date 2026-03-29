@@ -135,13 +135,16 @@ def main():
         remove_unused_columns=False,
     )
 
+    yes_id = tokenizer.encode(" Yes", add_special_tokens=False)[0]
+    no_id  = tokenizer.encode(" No",  add_special_tokens=False)[0]
+
     trainer = CoLLMTrainer(
         model=model,
         args=training_args,
         train_dataset=train_ds,
         eval_dataset=eval_ds,
         data_collator=collator,
-        compute_metrics=CoLLMTrainer.default_compute_metrics,
+        compute_metrics=CoLLMTrainer.make_compute_metrics(yes_id, no_id),
     )
     trainer.train()
     trainer.save_model(args.output_dir)

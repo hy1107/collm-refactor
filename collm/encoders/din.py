@@ -18,7 +18,6 @@ class DINEncoder(BaseRecEncoder):
     def __init__(self, config: RecEncoderConfig):
         super().__init__()
         d = config.embedding_dim
-        self.user_emb = nn.Embedding(config.user_num, d)
         self.item_emb = nn.Embedding(config.item_num, d, padding_idx=0)
         # 注意力網絡：輸入 [target, hist, target-hist, target*hist]，輸出 score
         self.attention = nn.Sequential(
@@ -28,7 +27,6 @@ class DINEncoder(BaseRecEncoder):
         )
         self._embedding_dim = d
 
-        nn.init.normal_(self.user_emb.weight, std=0.01)
         nn.init.normal_(self.item_emb.weight, std=0.01)
 
     def get_user_embedding(self, user_ids: Tensor, **kwargs) -> Tensor:
@@ -36,8 +34,8 @@ class DINEncoder(BaseRecEncoder):
         target_item_ids = kwargs.get("target_item_ids")
 
         if seq_history is None or target_item_ids is None:
-            # 退化為普通 user embedding lookup
-            return self.user_emb(user_ids)
+            # 無歷史紀錄時返回零向量（冷啟動場景）
+            return torch.zeros(user_ids.size(0), self._embedding_dim, device=user_ids.device)
 
         hist_emb = self.item_emb(seq_history)                    # (batch, seq, d)
         target_emb = self.item_emb(target_item_ids)              # (batch, d)
