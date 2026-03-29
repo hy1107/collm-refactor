@@ -98,11 +98,7 @@ def build_records(ratings: pd.DataFrame, id2title: dict) -> tuple:
         pos = ((df["split"] == s) & (df["label"] == 1)).sum()
         print(f"  {s:8s}: {n:>7} 筆（pos={pos}, neg={n-pos}）")
 
-    # ── 5. 暖物品 = 訓練段正樣本中出現的物品 ─────────────────────────
-    warm_items = set(df[(df["split"] == "train") & (df["label"] == 1)]["iid"])
-    print(f"  暖物品數：{len(warm_items)}")
-
-    # ── 6. 逐時間順序處理，維護遞增歷史 ─────────────────────────────
+    # ── 5. 逐時間順序處理，維護遞增歷史 ─────────────────────────────
     user_hist_iid:   dict[int, list] = defaultdict(list)
     user_hist_title: dict[int, list] = defaultdict(list)
     user_pos_seen:   dict[int, set]  = defaultdict(set)
@@ -123,11 +119,11 @@ def build_records(ratings: pd.DataFrame, id2title: dict) -> tuple:
             train_records.append(
                 make_record(uid, iid, title, hist_iid, hist_title, label)
             )
-        elif split == "valid" and iid in warm_items:
+        elif split == "valid":
             valid_records.append(
                 make_record(uid, iid, title, hist_iid, hist_title, label)
             )
-        elif split == "test" and iid in warm_items:
+        elif split == "test":
             test_records.append(
                 make_record(uid, iid, title, hist_iid, hist_title, label)
             )
