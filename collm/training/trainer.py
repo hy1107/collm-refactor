@@ -2,6 +2,7 @@ from __future__ import annotations
 from typing import Callable
 import numpy as np
 import torch
+import torch.nn.functional as F
 from transformers import Trainer
 from transformers.trainer_utils import EvalPrediction
 from collm.training.metrics import compute_auc, compute_hr, compute_ndcg
@@ -39,6 +40,32 @@ class CoLLMTrainer(Trainer):
                 "ndcg@10": compute_ndcg(scores, labels, k=10),
             }
         return _compute
+
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        """BCE loss on the Yes-token logit only.
+
+        論文 Section IV-B Eq.(5) 明確使用 binary cross-entropy loss：
+        只取 answer token 位置的 Yes-token logit，對二元標籤（1=Yes, 0=No）計算 BCEWithLogits。
+        不使用 HuggingFace 預設的 causal LM cross-entropy。
+        """
+        outputs = model(**inputs)
+        seq_labels = inputs.get("labels")   # (batch, seq_len), -100 everywhere except answer pos
+        logits = outputs.logits              # (batch, seq_len, vocab)
+
+        batch_size = logits.shape[0]
+        yes_logits = logits.new_zeros(batch_size)
+        binary_labels = logits.new_zeros(batch_size)
+
+        for i in range(batch_size):
+            valid = (seq_labels[i] != -100).nonzero(as_tuple=True)[0]
+            if len(valid) == 0:
+                continue
+            pos = valid[0]
+            yes_logits[i] = logits[i, pos, self.yes_token_id]
+            binary_labels[i] = 1.0 if int(seq_labels[i, pos]) == self.yes_token_id else 0.0
+
+        loss = F.binary_cross_entropy_with_logits(yes_logits, binary_labels)
+        return (loss, outputs) if return_outputs else loss
 
     def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
         """只保留 Yes/No logit，避免 OOM。回傳 (loss, scores(N,2), binary_labels(N,))。"""

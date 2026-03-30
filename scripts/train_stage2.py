@@ -114,7 +114,7 @@ def main():
 
     base_config = getattr(backbone, "base_model", backbone).config
     llm_dim = base_config.hidden_size
-    cie = CIEModule(rec_dim=cfg.rec.embedding_dim, llm_dim=llm_dim)
+    cie = CIEModule(rec_dim=cfg.rec.embedding_dim, llm_dim=llm_dim, proj_mid_times=cfg.proj_mid_times)
 
     model = CoLLMModel(
         backbone=backbone,

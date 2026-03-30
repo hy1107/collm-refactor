@@ -48,3 +48,5 @@ class CoLLMConfig:
     # 協同信號注入層：0 = input embedding 層（原始 CoLLM 預設），
     # 正整數 N = 在第 N 個 transformer block 的輸出後注入（1-indexed）
     injection_layer: int = 0
+    # CIE MLP 的 hidden dim 倍數（hidden = d_rec * proj_mid_times），對應原始論文設定
+    proj_mid_times: int = 10
