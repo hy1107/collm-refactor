@@ -30,7 +30,7 @@ from collm.training.trainer import CoLLMTrainer
 DATA_DIR = "C:/Users/haoyu/Desktop/vicuna/data/ml-1m"
 
 # 基礎模型（HuggingFace model id 或本地路徑）
-BASE_MODEL = "lmsys/vicuna-7b-v1.3"
+BASE_MODEL = "lmsys/vicuna-7b-v1.5"
 
 # 輸出 checkpoint 路徑
 OUTPUT_DIR = "./stage1_fixed"
