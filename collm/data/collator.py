@@ -91,6 +91,9 @@ class RecDataCollator:
             "input_ids": torch.stack(input_ids_list),
             "attention_mask": torch.stack(attention_mask_list),
             "labels": torch.stack(labels_list),
+            "binary_labels": torch.tensor(
+                [float(s["label"]) for s in samples], dtype=torch.float32
+            ),
             "user_ids": torch.tensor(user_ids, dtype=torch.long),
             "target_item_ids": torch.tensor(target_item_ids, dtype=torch.long),
             "user_placeholder_pos": torch.tensor(user_ph_pos, dtype=torch.long),

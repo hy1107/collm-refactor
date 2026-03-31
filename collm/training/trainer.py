@@ -54,7 +54,7 @@ class CoLLMTrainer(Trainer):
 
         batch_size = logits.shape[0]
         yes_logits = logits.new_zeros(batch_size)
-        binary_labels = logits.new_zeros(batch_size)
+        binary_labels = inputs["binary_labels"].to(logits.device)
 
         for i in range(batch_size):
             valid = (seq_labels[i] != -100).nonzero(as_tuple=True)[0]
@@ -62,7 +62,6 @@ class CoLLMTrainer(Trainer):
                 continue
             pos = valid[0]
             yes_logits[i] = logits[i, pos, self.yes_token_id]
-            binary_labels[i] = 1.0 if int(seq_labels[i, pos]) == self.yes_token_id else 0.0
 
         loss = F.binary_cross_entropy_with_logits(yes_logits, binary_labels)
         return (loss, outputs) if return_outputs else loss
@@ -83,7 +82,7 @@ class CoLLMTrainer(Trainer):
 
         yes_scores = torch.zeros(batch_size, device=logits.device, dtype=torch.float32)
         no_scores  = torch.zeros(batch_size, device=logits.device, dtype=torch.float32)
-        binary_labels = torch.zeros(batch_size, device=logits.device, dtype=torch.long)
+        binary_labels = inputs["binary_labels"].to(device=logits.device, dtype=torch.long)
 
         for i in range(batch_size):
             valid = (seq_labels[i] != -100).nonzero(as_tuple=True)[0]
@@ -92,7 +91,6 @@ class CoLLMTrainer(Trainer):
             pos = valid[0]
             yes_scores[i] = logits[i, pos, self.yes_token_id].float()
             no_scores[i]  = logits[i, pos, self.no_token_id].float()
-            binary_labels[i] = 1 if int(seq_labels[i, pos]) == self.yes_token_id else 0
 
         scores = torch.stack([yes_scores, no_scores], dim=1)  # (batch, 2)
         return (loss, scores, binary_labels)
